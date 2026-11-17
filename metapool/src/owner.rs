@@ -1,4 +1,7 @@
 use crate::*;
+
+/// hard limit for the NSLP max discount (swap fee) set via set_contract_params. 5000 => 50%
+pub const MAX_NSLP_DISCOUNT_BASIS_POINTS: u16 = 5000;
 use near_sdk::{near_bindgen, serde::Serialize};
 
 #[derive(Serialize)]
@@ -321,6 +324,24 @@ impl MetaPool {
     pub fn set_contract_params(&mut self, params: ContractParamsJSON) {
         self.assert_operator_or_owner();
         assert!(params.nslp_max_discount_basis_points > params.nslp_min_discount_basis_points);
+        // min discount 0 means a zero swap fee, and liquid_unstake asserts fee > sum of the cuts: it would always panic
+        assert!(
+            params.nslp_min_discount_basis_points >= 1,
+            "nslp_min_discount_basis_points must be at least 1"
+        );
+        assert!(
+            params.nslp_max_discount_basis_points <= MAX_NSLP_DISCOUNT_BASIS_POINTS,
+            "nslp_max_discount_basis_points can not be more than {}",
+            MAX_NSLP_DISCOUNT_BASIS_POINTS
+        );
+        // the cuts are a % of the swap fee, together with the developers cut they must leave something for the LPs
+        assert!(
+            (params.operator_swap_cut_basis_points as u32)
+                + (params.treasury_swap_cut_basis_points as u32)
+                + (DEVELOPERS_SWAP_CUT_BASIS_POINTS as u32)
+                < 10_000,
+            "operator + treasury + developers swap cuts must be less than 100%"
+        );
 
         self.nslp_liquidity_target = params.nslp_liquidity_target.0;
         self.nslp_max_discount_basis_points = params.nslp_max_discount_basis_points;
@@ -393,4 +414,75 @@ impl MetaPool {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests_set_contract_params {
+    use super::*;
+    use near_sdk::test_utils::{accounts, VMContextBuilder};
+    use near_sdk::{testing_env, MockedBlockchain};
+
+    fn setup() -> MetaPool {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(accounts(0))
+            .predecessor_account_id(accounts(0))
+            .build());
+        MetaPool::new(
+            accounts(0).to_string(),
+            accounts(1).to_string(),
+            accounts(2).to_string(),
+            "meta.near".to_string(),
+        )
+    }
+
+    fn valid_params() -> ContractParamsJSON {
+        ContractParamsJSON {
+            nslp_liquidity_target: (10_000 * ONE_NEAR).into(),
+            nslp_max_discount_basis_points: 1000,
+            nslp_min_discount_basis_points: 10,
+            staker_meta_mult_pct: 500,
+            stnear_sell_meta_mult_pct: 100,
+            lp_provider_meta_mult_pct: 2000,
+            operator_rewards_fee_basis_points: 50,
+            operator_swap_cut_basis_points: 300,
+            treasury_swap_cut_basis_points: 2500,
+            min_deposit_amount: ONE_NEAR.into(),
+            min_stake_unstake_amount_movement: ONE_NEAR.into(),
+            unstake_for_rebalance_cap_bp: 1000,
+        }
+    }
+
+    #[test]
+    fn valid_params_are_accepted() {
+        let mut c = setup();
+        c.set_contract_params(valid_params());
+        assert_eq!(c.nslp_min_discount_basis_points, 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be at least 1")]
+    fn min_discount_zero_is_rejected() {
+        let mut c = setup();
+        let mut p = valid_params();
+        p.nslp_min_discount_basis_points = 0;
+        c.set_contract_params(p);
+    }
+
+    #[test]
+    #[should_panic(expected = "can not be more than")]
+    fn max_discount_above_limit_is_rejected() {
+        let mut c = setup();
+        let mut p = valid_params();
+        p.nslp_max_discount_basis_points = 9999;
+        c.set_contract_params(p);
+    }
+
+    #[test]
+    #[should_panic(expected = "swap cuts must be less than 100%")]
+    fn swap_cuts_above_100_percent_are_rejected() {
+        let mut c = setup();
+        let mut p = valid_params();
+        p.treasury_swap_cut_basis_points = 9_800;
+        c.set_contract_params(p);
+    }
 }
