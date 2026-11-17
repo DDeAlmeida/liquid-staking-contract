@@ -221,3 +221,60 @@ impl Account {
         return to_withdraw;
     }
 }
+
+#[cfg(test)]
+mod tests_unlock_epoch {
+    use super::*;
+    use near_sdk::test_utils::{accounts, VMContextBuilder};
+    use near_sdk::{testing_env, MockedBlockchain};
+
+    fn setup() -> MetaPool {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(accounts(0))
+            .predecessor_account_id(accounts(0))
+            .epoch_height(100)
+            .build());
+        MetaPool::new(
+            accounts(0).to_string(),
+            accounts(1).to_string(),
+            accounts(2).to_string(),
+            "meta.near".to_string(),
+        )
+    }
+
+    fn setup_with_pool_and_user(pool_staked: u128, user_shares: u128) -> (MetaPool, String) {
+        let mut c = setup();
+        let mut sp = StakingPoolInfo::new("pool1.pool.near".to_string(), 10000);
+        sp.staked = pool_staked;
+        c.staking_pools.push(sp);
+        let total = std::cmp::max(pool_staked, user_shares);
+        c.total_for_staking = total;
+        c.total_actually_staked = pool_staked;
+        c.total_stake_shares = total;
+        let user = accounts(3).to_string();
+        let mut acc = Account::default();
+        acc.stake_shares = user_shares;
+        c.internal_update_account(&user, &acc);
+        (c, user)
+    }
+
+    #[test]
+    fn follow_up_unstake_does_not_move_unlock_epoch_earlier() {
+        let (mut c, user) = setup_with_pool_and_user(1000 * ONE_NEAR, 200 * ONE_NEAR);
+        let mut acc = c.internal_get_account(&user);
+        acc.unstaked_requested_unlock_epoch = 118; // an earlier 8-epoch unstake
+        c.internal_unstake_shares(&user, &mut acc, ONE_NEAR);
+        assert_eq!(c.internal_get_account(&user).unstaked_requested_unlock_epoch, 118);
+    }
+
+    #[test]
+    fn split_unstake_gets_the_same_delay_as_a_single_one() {
+        // pool has 120 NEAR staked: one 100 NEAR unstake is a 4 epoch wait, but 100 + 30 exceeds the pool
+        let (mut c, user) = setup_with_pool_and_user(120 * ONE_NEAR, 200 * ONE_NEAR);
+        let mut acc = c.internal_get_account(&user);
+        c.internal_unstake_shares(&user, &mut acc, 100 * ONE_NEAR);
+        assert_eq!(acc.unstaked_requested_unlock_epoch, 100 + NUM_EPOCHS_TO_UNLOCK);
+        c.internal_unstake_shares(&user, &mut acc, 30 * ONE_NEAR);
+        assert_eq!(acc.unstaked_requested_unlock_epoch, 100 + 2 * NUM_EPOCHS_TO_UNLOCK);
+    }
+}

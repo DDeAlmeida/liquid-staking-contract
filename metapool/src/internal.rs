@@ -215,9 +215,16 @@ impl MetaPool {
         acc.sub_stake_shares(stake_shares_to_burn, amount_to_unstake);
         //the amount is now "unstaked", i.e. the user has a claim to this amount, 4-8 epochs form now
         acc.unstaked += amount_to_unstake;
+        // The delay estimate must include what is already queued this epoch (otherwise a big unstake split in
+        // smaller pieces is classified as a short wait), and a new unstake must never move an existing
+        // unlock epoch earlier: the account has a single unlock epoch for its whole unstaked balance.
+        let new_unlock_epoch = env::epoch_height()
+            + self.internal_compute_current_unstaking_delay(
+                self.epoch_unstake_orders + amount_to_unstake,
+            ); //when the unstake will be available
         acc.unstaked_requested_unlock_epoch =
-            env::epoch_height() + self.internal_compute_current_unstaking_delay(amount_to_unstake); //when the unstake will be available
-                                                                                                    //--contract totals
+            std::cmp::max(acc.unstaked_requested_unlock_epoch, new_unlock_epoch);
+        //--contract totals
         self.epoch_unstake_orders += amount_to_unstake;
         self.total_unstake_claims += amount_to_unstake;
         self.total_stake_shares -= stake_shares_to_burn; //burn
