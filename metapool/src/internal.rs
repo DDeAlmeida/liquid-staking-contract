@@ -100,6 +100,9 @@ impl MetaPool {
         account_id: &String,
         requested_amount: u128,
     ) -> Promise {
+        // like stake/unstake: do not move funds while an async staking-pool operation is in flight,
+        // the global counters (total_available, retrieved_for_unstake_claims...) are being reconciled
+        self.assert_not_busy();
         let mut account = self.internal_get_account(&account_id);
 
         //MIMIC staking-pool, move 1st form unstaked->available, it must be free to withdraw
@@ -743,5 +746,54 @@ impl MetaPool {
                 self.unstaked_for_rebalance,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_withdraw_busy {
+    use super::*;
+    use near_sdk::test_utils::{accounts, VMContextBuilder};
+    use near_sdk::{testing_env, MockedBlockchain};
+
+    fn setup() -> MetaPool {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(accounts(0))
+            .predecessor_account_id(accounts(0))
+            .epoch_height(100)
+            .build());
+        MetaPool::new(
+            accounts(0).to_string(),
+            accounts(1).to_string(),
+            accounts(2).to_string(),
+            "meta.near".to_string(),
+        )
+    }
+
+    fn setup_with_unstaked(amount: u128) -> (MetaPool, String) {
+        let mut c = setup();
+        let user = accounts(3).to_string();
+        let mut acc = Account::default();
+        acc.unstaked = amount; // unlocked: unlock epoch is 0 and the funds were already retrieved
+        c.internal_update_account(&user, &acc);
+        c.retrieved_for_unstake_claims = amount;
+        c.total_unstake_claims = amount;
+        c.contract_account_balance = amount;
+        (c, user)
+    }
+
+    #[test]
+    #[should_panic(expected = "Contract is busy")]
+    fn withdraw_panics_while_contract_is_busy() {
+        let (mut c, user) = setup_with_unstaked(5 * ONE_NEAR);
+        c.contract_busy = true;
+        c.internal_withdraw_use_unstaked(&user, 5 * ONE_NEAR);
+    }
+
+    #[test]
+    fn withdraw_works_when_not_busy() {
+        let (mut c, user) = setup_with_unstaked(5 * ONE_NEAR);
+        c.internal_withdraw_use_unstaked(&user, 5 * ONE_NEAR);
+        let acc = c.internal_get_account(&user);
+        assert_eq!((acc.unstaked, acc.available), (0, 0));
     }
 }
